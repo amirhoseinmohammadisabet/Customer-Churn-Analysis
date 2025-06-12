@@ -3,40 +3,44 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier 
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix, classification_report
+from imblearn.over_sampling import SMOTE 
 import warnings
-import io 
+import io
 
 # Suppress specific FutureWarnings from seaborn for cleaner output in app
 warnings.filterwarnings("ignore", category=FutureWarning, module="seaborn")
+# Suppress specific warnings from scikit-learn related to metrics
+warnings.filterwarnings("ignore", message="The feature names should match")
 
-# --- Function to Load and Preprocess Data ---
-# Encapsulate all your data loading and preprocessing logic here
-@st.cache_data # Cache the data loading and preprocessing for performance
+
+# --- Function to Load and Preprocess Data (Existing Function - no changes needed here unless specified) ---
+@st.cache_data
 def load_and_preprocess_data():
     try:
         df = pd.read_csv('WA_Fn-UseC_-Telco-Customer-Churn.csv')
     except FileNotFoundError:
         st.error("Dataset 'WA_Fn-UseC_-Telco-Customer-Churn.csv' not found. Please ensure it's in the same directory as app.py.")
-        st.stop() # Stop the app if data is not found
+        st.stop()
 
-    # Handle 'TotalCharges' missing values and type conversion (from EDA)
     df['TotalCharges'] = pd.to_numeric(df['TotalCharges'], errors='coerce')
     df['TotalCharges'] = df['TotalCharges'].fillna(0)
 
     df_processed = df.copy()
     df_processed = df_processed.drop('customerID', axis=1)
 
-    # Convert 'No internet service' and 'No phone service' to 'No' for consistency
     for col in ['OnlineSecurity', 'OnlineBackup', 'DeviceProtection', 'TechSupport',
                 'StreamingTV', 'StreamingMovies', 'MultipleLines']:
         df_processed[col] = df_processed[col].replace('No internet service', 'No')
         df_processed[col] = df_processed[col].replace('No phone service', 'No')
 
-    # Convert 'gender' to 0/1
     df_processed['gender'] = df_processed['gender'].map({'Female': 0, 'Male': 1})
 
-    # Convert 'Yes'/'No' columns to 0/1
     binary_cols_to_map = ['Partner', 'Dependents', 'PhoneService', 'PaperlessBilling',
                           'OnlineSecurity', 'OnlineBackup', 'DeviceProtection', 'TechSupport',
                           'StreamingTV', 'StreamingMovies', 'MultipleLines']
@@ -44,21 +48,17 @@ def load_and_preprocess_data():
         if df_processed[col].dtype == 'object':
             df_processed[col] = df_processed[col].map({'Yes': 1, 'No': 0})
 
-    # Ensure SeniorCitizen is numeric
     if df_processed['SeniorCitizen'].dtype == 'object':
         df_processed['SeniorCitizen'] = df_processed['SeniorCitizen'].astype(int)
 
-    # One-Hot Encode remaining categorical features
     categorical_cols_onehot = [col for col in df_processed.select_dtypes(include='object').columns if col != 'Churn']
     df_processed = pd.get_dummies(df_processed, columns=categorical_cols_onehot, drop_first=True, dtype=int)
 
-    # Convert target variable 'Churn' to numerical (0/1)
     df_processed['Churn'] = df_processed['Churn'].map({'Yes': 1, 'No': 0})
 
-    # Feature Engineering
     service_cols = ['PhoneService', 'MultipleLines', 'OnlineSecurity', 'OnlineBackup',
                     'DeviceProtection', 'TechSupport', 'StreamingTV', 'StreamingMovies']
-    for col in service_cols: # Ensure these are numeric before summing
+    for col in service_cols:
         if df_processed[col].dtype == 'object':
             df_processed[col] = df_processed[col].map({'Yes':1, 'No':0})
     df_processed['TotalServices'] = df_processed[service_cols].sum(axis=1)
@@ -67,7 +67,6 @@ def load_and_preprocess_data():
         lambda row: row['MonthlyCharges'] / row['tenure'] if row['tenure'] > 0 else 0, axis=1
     )
 
-    # Robust HasInternetService creation (handles cases where 'No' might be dropped)
     if 'InternetService_No' in df_processed.columns:
         df_processed['HasInternetService'] = 1 - df_processed['InternetService_No']
     elif 'InternetService_Fiber optic' in df_processed.columns or 'InternetService_DSL' in df_processed.columns:
@@ -77,7 +76,6 @@ def load_and_preprocess_data():
     else:
         df_processed['HasInternetService'] = 0
 
-    # Robust IsLoyalCustomer creation
     if 'Contract_Two year' in df_processed.columns and 'Contract_One year' in df_processed.columns:
         df_processed['IsLoyalCustomer'] = df_processed['Contract_Two year'].astype(int) | df_processed['Contract_One year'].astype(int)
     elif 'Contract_Two year' in df_processed.columns:
@@ -87,12 +85,77 @@ def load_and_preprocess_data():
     else:
         df_processed['IsLoyalCustomer'] = 0
 
-    # Feature Scaling
     numerical_cols_for_scaling = ['tenure', 'MonthlyCharges', 'TotalCharges', 'TotalServices', 'MonthlyChargePerTenure']
     scaler = StandardScaler()
     df_processed[numerical_cols_for_scaling] = scaler.fit_transform(df_processed[numerical_cols_for_scaling])
 
     return df_processed, df # Return both processed and original for different views
+
+
+# --- New Function: Train and Evaluate Models ---
+@st.cache_resource # Cache the trained models and results for performance
+def train_and_evaluate_models(df_processed_data):
+    st.subheader("Training Models...")
+
+    # Separate features (X) and target (y)
+    X = df_processed_data.drop('Churn', axis=1)
+    y = df_processed_data['Churn']
+
+    # Split data into training and testing sets
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y) # Stratify to maintain churn ratio
+
+    st.write(f"Original Churn Ratio (Train): {y_train.value_counts(normalize=True)[1]:.2f}")
+
+    # Handle Class Imbalance using SMOTE
+    st.subheader("Handling Class Imbalance with SMOTE...")
+    smote = SMOTE(random_state=42)
+    X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
+
+    st.write(f"Resampled Churn Ratio (Train): {y_train_resampled.value_counts(normalize=True)[1]:.2f}")
+    st.write(f"Original Training samples: {len(y_train)}, Resampled Training samples: {len(y_train_resampled)}")
+
+    models = {
+        "Logistic Regression": LogisticRegression(random_state=42, solver='liblinear', class_weight='balanced'), # Add class_weight
+        "Random Forest": RandomForestClassifier(random_state=42, class_weight='balanced'), # Add class_weight
+        "XGBoost": XGBClassifier(random_state=42, use_label_encoder=False, eval_metric='logloss', scale_pos_weight=(len(y_train)-y_train.sum())/y_train.sum()) # Use scale_pos_weight
+    }
+
+    results = {}
+    best_model_name = None
+    best_f1 = -1
+
+    for name, model in models.items():
+        st.write(f"**Training {name}...**")
+        model.fit(X_train_resampled, y_train_resampled)
+        y_pred = model.predict(X_test)
+        y_proba = model.predict_proba(X_test)[:, 1] # Probability of positive class
+
+        accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred)
+        recall = recall_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred)
+        roc_auc = roc_auc_score(y_test, y_proba)
+        cm = confusion_matrix(y_test, y_pred)
+        clf_report = classification_report(y_test, y_pred, output_dict=True) # Get dict for better display
+
+        results[name] = {
+            "model": model,
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1_score": f1,
+            "roc_auc": roc_auc,
+            "confusion_matrix": cm,
+            "classification_report": clf_report
+        }
+
+        if f1 > best_f1: # We prioritize F1-score for imbalanced classification
+            best_f1 = f1
+            best_model_name = name
+
+    st.success("Model Training and Evaluation Complete!")
+    return results, best_model_name, X_train_resampled.columns.tolist() # Return feature names for importance
+
 
 # --- Streamlit App Layout ---
 
@@ -105,13 +168,13 @@ st.set_page_config(
 st.title("📈 Telco Customer Churn Analysis Dashboard")
 st.markdown("---")
 
-# Load data
+# Load data (only once due to st.cache_data)
 df_processed, df_original = load_and_preprocess_data()
 
 st.sidebar.header("Navigation")
 page_selection = st.sidebar.radio(
     "Go to",
-    ["Overview & Raw Data", "Exploratory Data Analysis", "Feature Engineering Insights"]
+    ["Overview & Raw Data", "Exploratory Data Analysis", "Feature Engineering Insights", "Model Training & Evaluation"] # Added new page
 )
 
 # --- Page 1: Overview & Raw Data ---
@@ -123,10 +186,10 @@ if page_selection == "Overview & Raw Data":
     st.write(df_original.head())
 
     st.subheader("Dataset Information")
-    buffer = io.StringIO() # Create a buffer to capture info() output
+    buffer = io.StringIO()
     df_original.info(buf=buffer)
     s = buffer.getvalue()
-    st.text(s) # Display info() output
+    st.text(s)
 
     st.subheader("Descriptive Statistics")
     st.write(df_original.describe())
@@ -162,9 +225,8 @@ elif page_selection == "Exploratory Data Analysis":
         plt.xticks(rotation=45, ha='right')
         st.pyplot(fig2)
 
-        # Display churn rate by selected category
         churn_rate_by_cat = df_original.groupby(selected_cat_col)['Churn'].value_counts(normalize=True).unstack().get('Yes', 0)
-        if not isinstance(churn_rate_by_cat, pd.Series): # Handle case where get returns single value 0
+        if not isinstance(churn_rate_by_cat, pd.Series):
             churn_rate_by_cat = pd.Series([churn_rate_by_cat], index=['N/A'])
         st.write(f"**Churn Rate by {selected_cat_col}:**")
         st.dataframe(churn_rate_by_cat.apply(lambda x: f"{x:.2%}"))
@@ -208,7 +270,6 @@ elif page_selection == "Feature Engineering Insights":
     st.subheader("Distribution of Engineered Features")
     engineered_features = ['TotalServices', 'MonthlyChargePerTenure', 'HasInternetService', 'IsLoyalCustomer']
 
-    # For binary engineered features, treat as categorical for plots
     binary_engineered = ['HasInternetService', 'IsLoyalCustomer']
 
     for feature in engineered_features:
@@ -218,10 +279,10 @@ elif page_selection == "Feature Engineering Insights":
             sns.countplot(x=feature, hue='Churn', data=df_processed, palette='coolwarm', ax=ax6)
             ax6.set_title(f'Churn Distribution by {feature}')
             st.pyplot(fig6)
-            churn_rate_by_engineered = df_processed.groupby(feature)['Churn'].value_counts(normalize=True).unstack().get(1, 0) # Assuming 1 is churned
+            churn_rate_by_engineered = df_processed.groupby(feature)['Churn'].value_counts(normalize=True).unstack().get(1, 0)
             st.write(f"**Churn Rate by {feature}:**")
             st.dataframe(churn_rate_by_engineered.apply(lambda x: f"{x:.2%}"))
-        else: # Treat as numerical
+        else:
             colA, colB = st.columns(2)
             with colA:
                 fig7, ax7 = plt.subplots(figsize=(7, 5))
@@ -235,8 +296,6 @@ elif page_selection == "Feature Engineering Insights":
                 st.pyplot(fig8)
 
     st.subheader("Correlation Matrix (All Scaled Numerical Features)")
-    # Include all numerical features, including engineered ones, from processed dataframe
-    # Make sure 'Churn' is at the end or correctly included in the heatmap
     numerical_and_engineered_cols = [col for col in df_processed.columns if df_processed[col].dtype in ['float64', 'int64'] and col != 'Churn']
     corr_matrix_processed = df_processed[numerical_and_engineered_cols + ['Churn']].corr()
 
@@ -245,6 +304,72 @@ elif page_selection == "Feature Engineering Insights":
     ax9.set_title('Correlation Matrix of All Relevant Numerical Features (Scaled)')
     st.pyplot(fig9)
 
-# Placeholder for Model Prediction (Future Step)
-# st.header("4. Churn Prediction (Coming Soon!)")
+# --- NEW Page: Model Training & Evaluation ---
+elif page_selection == "Model Training & Evaluation":
+    st.header("4. Model Training & Evaluation")
+    st.write("Here, we train and evaluate various machine learning models to predict customer churn.")
+
+    if st.button("Train and Evaluate Models"):
+        results, best_model_name, feature_names = train_and_evaluate_models(df_processed)
+
+        st.subheader("Model Performance Comparison")
+        metrics_df = pd.DataFrame.from_dict({
+            name: {
+                "Accuracy": res["accuracy"],
+                "Precision": res["precision"],
+                "Recall": res["recall"],
+                "F1-Score": res["f1_score"],
+                "ROC-AUC": res["roc_auc"]
+            } for name, res in results.items()
+        }, orient='index')
+        st.dataframe(metrics_df.style.highlight_max(axis=0, props='background-color: yellow;')) # Highlight best score
+
+        st.markdown(f"**Best Model (based on F1-Score): {best_model_name}**")
+        st.write("F1-Score is prioritized due to class imbalance.")
+
+        for name, res in results.items():
+            st.subheader(f"Detailed Results for {name}")
+            st.write("#### Classification Report:")
+            st.json(res["classification_report"]) # Display as JSON for readability
+            # st.text(classification_report(y_test_from_res, y_pred_from_res)) # Need to get y_test etc from results, or just display the dict
+
+            st.write("#### Confusion Matrix:")
+            fig_cm, ax_cm = plt.subplots(figsize=(6, 5))
+            sns.heatmap(res["confusion_matrix"], annot=True, fmt='d', cmap='Blues', ax=ax_cm,
+                        xticklabels=['Predicted No Churn', 'Predicted Churn'],
+                        yticklabels=['Actual No Churn', 'Actual Churn'])
+            ax_cm.set_ylabel('Actual Label')
+            ax_cm.set_xlabel('Predicted Label')
+            ax_cm.set_title(f'Confusion Matrix for {name}')
+            st.pyplot(fig_cm)
+
+        # Feature Importance for tree-based models
+        st.subheader("Feature Importance (from Best Tree-Based Model)")
+        if best_model_name in ["Random Forest", "XGBoost"]:
+            best_model = results[best_model_name]['model']
+            if hasattr(best_model, 'feature_importances_'):
+                importances = best_model.feature_importances_
+            elif hasattr(best_model, 'coef_'): # For linear models like Logistic Regression (absolute coefficients)
+                importances = np.abs(best_model.coef_[0])
+            else:
+                importances = None # Fallback
+
+            if importances is not None:
+                feature_importance_df = pd.DataFrame({'Feature': feature_names, 'Importance': importances})
+                feature_importance_df = feature_importance_df.sort_values(by='Importance', ascending=False)
+
+                fig_fi, ax_fi = plt.subplots(figsize=(10, 8))
+                sns.barplot(x='Importance', y='Feature', data=feature_importance_df.head(15), ax=ax_fi, palette='viridis')
+                ax_fi.set_title(f'Top 15 Feature Importances for {best_model_name}')
+                ax_fi.set_xlabel('Importance')
+                ax_fi.set_ylabel('Feature')
+                st.pyplot(fig_fi)
+            else:
+                st.write("Feature importance is not directly available for the best model type.")
+        else:
+            st.write("Feature importance visualization is currently implemented for Random Forest and XGBoost models.")
+
+
+# Placeholder for Model Prediction (Future Step - could be integrated into Model Training page or a separate one)
+# st.header("5. Churn Prediction (Coming Soon!)")
 # st.write("This section will feature the trained machine learning model for churn prediction and interactive tools to test it.")
